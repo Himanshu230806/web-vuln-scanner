@@ -1,0 +1,28 @@
+# Core Dependencies
+requests>=2.31.0
+beautifulsoup4>=4.12.2
+selenium>=4.15.2
+urllib3>=2.1.0
+
+# OWASP ZAP API
+python-owasp-zap-v2.4>=0.0.21
+
+# PDF Report Generation
+reportlab>=3.6.12
+fpdf2>=2.7.5
+
+# Web Driver
+webdriver-manager>=4.0.1
+
+# Utilities
+colorama>=0.4.6
+tqdm>=4.66.1
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# Security & Parsing
+lxml>=4.9.3
+html5lib>=1.1
+
+# Testing
+pytest>=7.4.3
