@@ -17,6 +17,8 @@ colorama>=0.4.6
 tqdm>=4.66.1
 pyyaml>=6.0.1
 python-dotenv>=1.0.0
+python-owasp-zap-v2.4
+
 
 # Security & Parsing
 lxml>=4.9.3
