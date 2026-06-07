@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: web-vuln-scanner
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn web_app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: FLASK_ENV
+        value: production
+    disk:
+      name: output
+      mountPath: /opt/render/project/src/output
+      sizeGB: 1

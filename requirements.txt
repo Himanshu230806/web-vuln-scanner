@@ -4,15 +4,13 @@ beautifulsoup4>=4.12.2
 selenium>=4.15.2
 urllib3>=2.1.0
 
-# OWASP ZAP API
-python-owasp-zap-v2.4>=0.0.21
+# Web Framework
+flask>=3.0.0
+gunicorn>=21.2.0
+flask-limiter>=3.5.0
 
 # PDF Report Generation
 reportlab>=3.6.12
-fpdf2>=2.7.5
-
-# Web Driver
-webdriver-manager>=4.0.1
 
 # Utilities
 colorama>=0.4.6
@@ -23,6 +21,3 @@ python-dotenv>=1.0.0
 # Security & Parsing
 lxml>=4.9.3
 html5lib>=1.1
-
-# Testing
-pytest>=7.4.3
