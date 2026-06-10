@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Web Application Vulnerability Scanner
-Main entry point
+Web Application Vulnerability Scanner  (v3.0)
+Main CLI entry point – includes authentication options.
 """
 
 import argparse
 import sys
-import os
+from datetime import datetime
 from pathlib import Path
 
-# Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.scanner import VulnerabilityScanner
@@ -17,174 +16,140 @@ from reports.pdf_generator import PDFReportGenerator
 from config import OUTPUT_DIR
 
 
-def print_banner():
-    """Print application banner"""
-    banner = """
+BANNER = r"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║          Web Application Vulnerability Scanner v2.0          ║
+    ║         Web Application Vulnerability Scanner v3.0           ║
     ║                    Professional Edition                      ║
     ║                                                              ║
-    ║  Supports: SQLi, XSS, CSRF, Open Redirect, Dir Traversal   ║
-    ║  Integration: OWASP ZAP API, Selenium, BeautifulSoup       ║
+    ║  Modules: SQLi · XSS · CSRF · Open Redirect · Dir Traversal ║
+    ║           Security Headers · SSRF · XXE · IDOR               ║
     ╚══════════════════════════════════════════════════════════════╝
-    """
-    print(banner)
+"""
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Web Application Vulnerability Scanner',
+        description="Web Application Vulnerability Scanner v3.0",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python run.py -u https://example.com
-  python run.py -u https://example.com --zap
-  python run.py -u https://example.com -o report.pdf
-  python run.py -u https://example.com --depth 5 --threads 20
-        """
+  python run.py -u https://example.com --zap -d 5 -t 20
+  python run.py -u https://app.internal --auth-cookie "session=abc123"
+  python run.py -u https://api.example.com --auth-header "Authorization: Bearer token"
+  python run.py -u https://example.com --auth-basic admin:password
+  python run.py -u https://example.com --modules sqli,xss,headers
+        """,
     )
-    
-    parser.add_argument(
-        '-u', '--url',
-        required=True,
-        help='Target URL to scan'
+
+    # Target
+    parser.add_argument("-u", "--url", required=True, help="Target URL")
+
+    # Crawl / scan options
+    parser.add_argument("-d", "--depth", type=int, default=3, help="Crawl depth (default: 3)")
+    parser.add_argument("-t", "--threads", type=int, default=10, help="Worker threads (default: 10)")
+    parser.add_argument("--timeout", type=int, default=30, help="Request timeout seconds")
+    parser.add_argument("--delay", type=float, default=0.5, help="Delay between requests")
+    parser.add_argument("--user-agent", default=None, help="Custom User-Agent string")
+    parser.add_argument("--modules", help="Comma-separated module list (sqli,xss,csrf,redirect,traversal,headers,ssrf,xxe,idor)")
+    parser.add_argument("--zap", action="store_true", help="Enable OWASP ZAP integration")
+    parser.add_argument("--no-pdf", action="store_true", help="Skip PDF generation")
+    parser.add_argument("-o", "--output", help="Output PDF file path")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--no-verify-ssl", action="store_true", help="Disable TLS certificate verification")
+
+    # Authentication options
+    auth_group = parser.add_argument_group("Authentication")
+    auth_group.add_argument(
+        "--auth-cookie",
+        metavar="NAME=VALUE[,NAME=VALUE]",
+        help="Session cookies, e.g. session=abc123,csrftoken=xyz",
     )
-    
-    parser.add_argument(
-        '-d', '--depth',
-        type=int,
-        default=3,
-        help='Maximum crawl depth (default: 3)'
+    auth_group.add_argument(
+        "--auth-header",
+        metavar="HEADER: VALUE",
+        help="Auth header, e.g. 'Authorization: Bearer <token>'",
     )
-    
-    parser.add_argument(
-        '-t', '--threads',
-        type=int,
-        default=10,
-        help='Number of threads (default: 10)'
+    auth_group.add_argument(
+        "--auth-basic",
+        metavar="USER:PASS",
+        help="HTTP Basic auth credentials",
     )
-    
-    parser.add_argument(
-        '--zap',
-        action='store_true',
-        help='Enable OWASP ZAP integration'
-    )
-    
-    parser.add_argument(
-        '-o', '--output',
-        help='Output PDF report file'
-    )
-    
-    parser.add_argument(
-        '--no-pdf',
-        action='store_true',
-        help='Skip PDF report generation'
-    )
-    
-    parser.add_argument(
-        '--timeout',
-        type=int,
-        default=30,
-        help='Request timeout in seconds (default: 30)'
-    )
-    
-    parser.add_argument(
-        '--delay',
-        type=float,
-        default=0.5,
-        help='Delay between requests in seconds (default: 0.5)'
-    )
-    
-    parser.add_argument(
-        '--user-agent',
-        default='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        help='Custom User-Agent string'
-    )
-    
-    parser.add_argument(
-        '--modules',
-        help='Comma-separated list of modules to run (sqli,xss,csrf,redirect,traversal)'
-    )
-    
-    parser.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose output'
-    )
-    
+
     args = parser.parse_args()
-    
-    print_banner()
-    
-    # Validate URL
-    if not args.url.startswith(('http://', 'https://')):
+
+    print(BANNER)
+
+    if not args.url.startswith(("http://", "https://")):
         print("[-] Error: URL must start with http:// or https://")
         sys.exit(1)
-    
-    # Build configuration
-    scan_config = {
-        'max_depth': args.depth,
-        'threads': args.threads,
-        'request_timeout': args.timeout,
-        'delay': args.delay,
-        'user_agent': args.user_agent,
-        'use_zap': args.zap,
+
+    # Build scan config
+    scan_config: dict = {
+        "max_depth": args.depth,
+        "threads": args.threads,
+        "request_timeout": args.timeout,
+        "delay": args.delay,
+        "use_zap": args.zap,
+        "verify_ssl": not args.no_verify_ssl,
     }
-    
-    # Disable specific modules if requested
+    if args.user_agent:
+        scan_config["user_agent"] = args.user_agent
+
+    # Auth config
+    if args.auth_cookie:
+        cookies = {}
+        for pair in args.auth_cookie.split(","):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                cookies[k.strip()] = v.strip()
+        scan_config["auth_cookies"] = cookies
+
+    if args.auth_header:
+        if ":" in args.auth_header:
+            k, v = args.auth_header.split(":", 1)
+            scan_config["auth_headers"] = {k.strip(): v.strip()}
+
+    if args.auth_basic:
+        if ":" in args.auth_basic:
+            u, p = args.auth_basic.split(":", 1)
+            scan_config["auth_basic"] = (u, p)
+
+    # Module filter
     if args.modules:
-        enabled_modules = [m.strip().lower() for m in args.modules.split(',')]
-        all_modules = ['sqli', 'xss', 'csrf', 'open_redirect', 'directory_traversal']
-        for mod in all_modules:
-            if mod not in enabled_modules:
-                scan_config[f'enable_{mod}'] = False
-    
+        enabled = [m.strip().lower() for m in args.modules.split(",")]
+        for mod in ["sqli", "xss", "csrf", "open_redirect", "directory_traversal",
+                    "security_headers", "ssrf", "xxe", "idor"]:
+            if mod not in enabled:
+                scan_config[f"enable_{mod}"] = False
+
     try:
-        # Initialize scanner
-        print(f"[*] Initializing scanner for: {args.url}")
         scanner = VulnerabilityScanner(args.url, scan_config)
-        
-        # Run scan
-        vulnerabilities = scanner.run_scan()
-        
-        # Generate PDF report
-        if not args.no_pdf and vulnerabilities:
-            print("\n[*] Generating PDF report...")
+        vulns = scanner.run_scan()
+
+        if not args.no_pdf:
+            print("\n[*] Generating PDF report…")
             pdf_gen = PDFReportGenerator()
-            
-            output_file = args.output
-            if not output_file:
-                from datetime import datetime
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                output_file = OUTPUT_DIR / f"scan_report_{timestamp}.pdf"
-            
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_file = args.output or str(OUTPUT_DIR / f"scan_report_{ts}.pdf")
             report_path = pdf_gen.generate_report(
-                args.url,
-                vulnerabilities,
-                scanner.scan_stats,
-                output_file
+                args.url, vulns, scanner.scan_stats, out_file
             )
-            print(f"[+] PDF report saved: {report_path}")
-        
-        # Summary
-        print(f"\n[+] Scan completed!")
-        print(f"[+] Total vulnerabilities found: {len(vulnerabilities)}")
-        
-        if vulnerabilities:
-            sys.exit(1)  # Exit with error code if vulnerabilities found
-        else:
-            sys.exit(0)
-            
+            print(f"[+] Report saved: {report_path}")
+
+        print(f"\n[+] Done. Total findings: {len(vulns)}")
+        sys.exit(1 if vulns else 0)
+
     except KeyboardInterrupt:
-        print("\n[!] Scan interrupted by user")
+        print("\n[!] Interrupted")
         sys.exit(130)
-    except Exception as e:
-        print(f"\n[-] Error: {e}")
+    except Exception as exc:
+        print(f"\n[-] Fatal error: {exc}")
         if args.verbose:
             import traceback
             traceback.print_exc()
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -23,3 +23,5 @@ python-owasp-zap-v2.4
 # Security & Parsing
 lxml>=4.9.3
 html5lib>=1.1
+responses   # for tests
+aiosqlite   # optional async DB

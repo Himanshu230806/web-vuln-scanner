@@ -1,515 +1,441 @@
 #!/usr/bin/env python3
 """
-Web Vulnerability Scanner - Web Interface
-Deployed on Render via GitHub
+Web Vulnerability Scanner – Web Interface  (v3.0 – upgraded)
+
+Upgrades:
+  - Persistent scan history via SQLite (db.py)
+  - /history page listing past scans with vuln counts
+  - Per-scan-endpoint rate limit (5/hour) separate from global limits
+  - Auth options exposed in the UI (cookies, Bearer token, basic auth)
+  - New modules (security headers, SSRF, XXE, IDOR) shown in module list
+  - SSL verify_ssl warning shown in UI when disabled
 """
 
-from flask import Flask, render_template_string, request, send_file
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-import html
+import html as html_module
 import os
-import uuid
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
-# Add project root to path
+from flask import Flask, jsonify, render_template_string, request, send_file
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.scanner import VulnerabilityScanner
 from reports.pdf_generator import PDFReportGenerator
 from config import OUTPUT_DIR
+import db as scan_db
 
 app = Flask(__name__)
-
-# Ensure output directory exists
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+scan_db.init_db()
 
-# Rate limiting - 5 scans per hour per IP
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"]
+    default_limits=["200 per day", "50 per hour"],
 )
 
-# In-memory storage for scan results
-scan_results = {}
+# ──────────────────────────────────────────────────────────────────────────────
+# Templates
+# ──────────────────────────────────────────────────────────────────────────────
 
-# HTML Templates
-HOME_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web Vulnerability Scanner</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            padding: 40px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-        }
-        h1 {
-            color: #d32f2f;
-            text-align: center;
-            margin-bottom: 10px;
-            font-size: 2.5em;
-        }
-        .subtitle {
-            text-align: center;
-            color: #666;
-            margin-bottom: 30px;
-        }
-        .warning {
-            background: #fff3cd;
-            border-left: 5px solid #ffc107;
-            padding: 20px;
-            margin: 20px 0;
-            border-radius: 8px;
-        }
-        .warning h3 {
-            color: #856404;
-            margin-bottom: 10px;
-        }
-        .warning ul {
-            margin-left: 20px;
-            color: #856404;
-        }
-        form {
-            margin-top: 30px;
-        }
-        label {
-            display: block;
-            margin: 15px 0 5px 0;
-            font-weight: bold;
-            color: #333;
-        }
-        input[type="url"] {
-            width: 100%;
-            padding: 15px;
-            border: 2px solid #ddd;
-            border-radius: 8px;
-            font-size: 16px;
-            transition: border-color 0.3s;
-        }
-        input[type="url"]:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-        .checkbox-group {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 8px;
-            margin: 20px 0;
-        }
-        .checkbox-group label {
-            display: inline;
-            font-weight: normal;
-            margin-left: 8px;
-        }
-        .checkbox-item {
-            margin: 10px 0;
-        }
-        button {
-            width: 100%;
-            padding: 18px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 18px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-        }
-        .features {
-            margin-top: 40px;
-            padding-top: 30px;
-            border-top: 2px solid #eee;
-        }
-        .features h3 {
-            color: #333;
-            margin-bottom: 20px;
-        }
-        .feature-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-        }
-        .feature-item {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 10px;
-            text-align: center;
-        }
-        .feature-icon {
-            font-size: 2em;
-            margin-bottom: 10px;
-        }
-        .footer {
-            text-align: center;
-            margin-top: 30px;
-            color: #666;
-            font-size: 0.9em;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔒 Web Vulnerability Scanner</h1>
-        <p class="subtitle">Professional Security Assessment Tool</p>
-        
-        <div class="warning">
-            <h3>⚠️ Legal Notice</h3>
-            <ul>
-                <li>Only scan websites you <strong>own</strong> or have <strong>written permission</strong> to test</li>
-                <li>Unauthorized scanning is <strong>illegal</strong> and may result in criminal charges</li>
-                <li>You are solely responsible for any consequences of using this tool</li>
-            </ul>
-        </div>
-        
-        <form action="/scan" method="POST">
-            <label for="url">🌐 Target URL:</label>
-            <input type="url" id="url" name="url" placeholder="https://example.com" required>
-            
-            <div class="checkbox-group">
-                <label><strong>Select Vulnerability Tests:</strong></label>
-                <div class="checkbox-item">
-                    <input type="checkbox" name="modules" value="sqli" id="sqli" checked>
-                    <label for="sqli">SQL Injection</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" name="modules" value="xss" id="xss" checked>
-                    <label for="xss">Cross-Site Scripting (XSS)</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" name="modules" value="csrf" id="csrf" checked>
-                    <label for="csrf">CSRF</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" name="modules" value="redirect" id="redirect" checked>
-                    <label for="redirect">Open Redirect</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" name="modules" value="traversal" id="traversal" checked>
-                    <label for="traversal">Directory Traversal</label>
-                </div>
-            </div>
-            
-            <button type="submit">🔍 Start Security Scan</button>
-        </form>
-        
-        <div class="features">
-            <h3>✨ Features</h3>
-            <div class="feature-grid">
-                <div class="feature-item">
-                    <div class="feature-icon">🕷️</div>
-                    <div>Web Crawling</div>
-                </div>
-                <div class="feature-item">
-                    <div class="feature-icon">🛡️</div>
-                    <div>OWASP Top 10</div>
-                </div>
-                <div class="feature-item">
-                    <div class="feature-icon">📊</div>
-                    <div>PDF Reports</div>
-                </div>
-                <div class="feature-item">
-                    <div class="feature-icon">⚡</div>
-                    <div>Fast Scanning</div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="footer">
-            <p>Powered by Python, Flask & ReportLab</p>
-        </div>
+HOME_TEMPLATE = """
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Web Vulnerability Scanner v3</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);min-height:100vh;padding:20px}
+.container{max-width:860px;margin:0 auto;background:#fff;border-radius:16px;padding:40px;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+h1{color:#c0392b;text-align:center;margin-bottom:8px;font-size:2.2em}
+.subtitle{text-align:center;color:#555;margin-bottom:24px}
+.warning{background:#fff8e1;border-left:5px solid #f9a825;padding:16px;margin:16px 0;border-radius:6px}
+.warning h3{color:#7a5900;margin-bottom:8px}
+.warning ul{margin-left:20px;color:#7a5900}
+label{display:block;margin:14px 0 4px;font-weight:600;color:#222}
+input[type=url],input[type=text],input[type=password]{width:100%;padding:12px;border:2px solid #ddd;border-radius:7px;font-size:15px}
+input:focus{outline:none;border-color:#0f3460}
+.section{background:#f4f6fb;padding:18px;border-radius:8px;margin:18px 0}
+.section h3{color:#333;margin-bottom:14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.checkbox-item{margin:8px 0;display:flex;align-items:center;gap:8px}
+.checkbox-item label{margin:0;font-weight:normal;color:#333}
+.collapsible-toggle{background:none;border:none;color:#0f3460;cursor:pointer;font-size:14px;padding:0;text-decoration:underline;width:auto}
+.collapsible{display:none;margin-top:12px}
+button.submit{width:100%;padding:16px;background:linear-gradient(135deg,#0f3460,#533483);color:#fff;border:none;border-radius:8px;font-size:17px;font-weight:700;cursor:pointer;margin-top:8px}
+button.submit:hover{opacity:.92}
+.nav{text-align:right;margin-bottom:12px}
+.nav a{color:#0f3460;text-decoration:none;font-size:14px;margin-left:16px}
+.nav a:hover{text-decoration:underline}
+.badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:700;color:#fff;margin-left:6px}
+.badge-new{background:#27ae60}
+</style>
+</head><body><div class="container">
+
+<div class="nav">
+  <a href="/">🏠 Home</a>
+  <a href="/history">📋 Scan History</a>
+</div>
+
+<h1>🔒 Web Vulnerability Scanner</h1>
+<p class="subtitle">Professional Security Assessment Tool v3.0</p>
+
+<div class="warning">
+  <h3>⚠️ Legal Notice</h3>
+  <ul>
+    <li>Only scan websites you <strong>own</strong> or have <strong>written permission</strong> to test</li>
+    <li>Unauthorized scanning is <strong>illegal</strong></li>
+    <li>You are solely responsible for any consequences</li>
+  </ul>
+</div>
+
+<form action="/scan" method="POST">
+  <label for="url">🌐 Target URL</label>
+  <input type="url" id="url" name="url" placeholder="https://example.com" required>
+
+  <div class="section">
+    <h3>🧩 Vulnerability Modules</h3>
+    <div class="grid2">
+      <div class="checkbox-item"><input type="checkbox" name="modules" value="sqli" id="sqli" checked><label for="sqli">SQL Injection</label></div>
+      <div class="checkbox-item"><input type="checkbox" name="modules" value="xss" id="xss" checked><label for="xss">XSS</label></div>
+      <div class="checkbox-item"><input type="checkbox" name="modules" value="csrf" id="csrf" checked><label for="csrf">CSRF</label></div>
+      <div class="checkbox-item"><input type="checkbox" name="modules" value="redirect" id="redirect" checked><label for="redirect">Open Redirect</label></div>
+      <div class="checkbox-item"><input type="checkbox" name="modules" value="traversal" id="traversal" checked><label for="traversal">Directory Traversal</label></div>
+      <div class="checkbox-item"><input type="checkbox" name="modules" value="headers" id="headers" checked><label for="headers">Security Headers <span class="badge badge-new">NEW</span></label></div>
+      <div class="checkbox-item"><input type="checkbox" name="modules" value="ssrf" id="ssrf" checked><label for="ssrf">SSRF <span class="badge badge-new">NEW</span></label></div>
+      <div class="checkbox-item"><input type="checkbox" name="modules" value="xxe" id="xxe" checked><label for="xxe">XXE <span class="badge badge-new">NEW</span></label></div>
+      <div class="checkbox-item"><input type="checkbox" name="modules" value="idor" id="idor" checked><label for="idor">IDOR <span class="badge badge-new">NEW</span></label></div>
     </div>
-</body>
-</html>
-'''
+  </div>
 
-RESULT_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scan Results - Web Vulnerability Scanner</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            padding: 40px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-        }
-        h1 {
-            color: #333;
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        .success-box {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 15px;
-            margin-bottom: 30px;
-        }
-        .success-box h2 {
-            margin-bottom: 15px;
-        }
-        .success-box p {
-            margin: 10px 0;
-            font-size: 1.1em;
-        }
-        .vuln-count {
-            font-size: 3em;
-            font-weight: bold;
-            text-align: center;
-            margin: 20px 0;
-        }
-        .vuln-critical { color: #d32f2f; }
-        .vuln-high { color: #f57c00; }
-        .vuln-medium { color: #fbc02d; }
-        .vuln-low { color: #388e3c; }
-        .download-btn {
-            display: block;
-            width: 100%;
-            padding: 20px;
-            background: #4caf50;
-            color: white;
-            text-align: center;
-            text-decoration: none;
-            border-radius: 10px;
-            font-size: 1.2em;
-            font-weight: bold;
-            margin: 20px 0;
-            transition: transform 0.2s;
-        }
-        .download-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(76, 175, 80, 0.3);
-        }
-        .back-link {
-            display: block;
-            text-align: center;
-            color: #667eea;
-            text-decoration: none;
-            margin-top: 20px;
-        }
-        .back-link:hover {
-            text-decoration: underline;
-        }
-        .stats {
-            background: #f5f5f5;
-            padding: 20px;
-            border-radius: 10px;
-            margin: 20px 0;
-        }
-        .stats h3 {
-            margin-bottom: 15px;
-            color: #333;
-        }
-        .stat-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 10px 0;
-            border-bottom: 1px solid #ddd;
-        }
-        .error-box {
-            background: #ffebee;
-            color: #c62828;
-            padding: 30px;
-            border-radius: 15px;
-            text-align: center;
-        }
-        .error-box h2 {
-            margin-bottom: 15px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        {% if error %}
-        <div class="error-box">
-            <h2>❌ Scan Failed</h2>
-            <p>{{ error }}</p>
-            <a href="/" class="back-link">← Go Back</a>
-        </div>
-        {% else %}
-        <div class="success-box">
-            <h2>✅ Scan Complete!</h2>
-            <p><strong>Target:</strong> {{ url }}</p>
-            <p><strong>Scan ID:</strong> {{ scan_id }}</p>
-        </div>
-        
-        <div class="vuln-count {{ severity_class }}">
-            {{ count }}
-        </div>
-        <p style="text-align: center; font-size: 1.2em; margin-bottom: 30px;">
-            Vulnerabilities Found
-        </p>
-        
-        <div class="stats">
-            <h3>📊 Scan Statistics</h3>
-            <div class="stat-item">
-                <span>URLs Crawled:</span>
-                <span>{{ stats.urls_crawled }}</span>
-            </div>
-            <div class="stat-item">
-                <span>Forms Tested:</span>
-                <span>{{ stats.forms_tested }}</span>
-            </div>
-            <div class="stat-item">
-                <span>Parameters Tested:</span>
-                <span>{{ stats.parameters_tested }}</span>
-            </div>
-        </div>
-        
-        <a href="/download/{{ scan_id }}" class="download-btn">
-            📥 Download PDF Report
-        </a>
-        
-        <a href="/" class="back-link">← Scan Another Website</a>
-        {% endif %}
+  <div class="section">
+    <h3>🔐 Authentication (optional)</h3>
+    <label for="auth_cookie">Session Cookie (name=value, comma-separated)</label>
+    <input type="text" id="auth_cookie" name="auth_cookie" placeholder="session=abc123, csrftoken=xyz">
+    <label for="auth_header">Auth Header</label>
+    <input type="text" id="auth_header" name="auth_header" placeholder="Authorization: Bearer &lt;token&gt;">
+    <div class="grid2">
+      <div>
+        <label for="auth_user">Basic Auth Username</label>
+        <input type="text" id="auth_user" name="auth_user" placeholder="admin">
+      </div>
+      <div>
+        <label for="auth_pass">Basic Auth Password</label>
+        <input type="password" id="auth_pass" name="auth_pass" placeholder="password">
+      </div>
     </div>
-</body>
-</html>
-'''
+  </div>
 
-@app.route('/')
+  <button type="submit" class="submit">🔍 Start Security Scan</button>
+</form>
+
+</div></body></html>
+"""
+
+
+RESULT_TEMPLATE = """
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Scan Results</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#1a1a2e,#0f3460);min-height:100vh;padding:20px}
+.container{max-width:860px;margin:0 auto;background:#fff;border-radius:16px;padding:36px;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+.header-box{padding:24px;border-radius:12px;margin-bottom:24px;color:#fff}
+.header-box.success{background:linear-gradient(135deg,#0f3460,#533483)}
+.header-box.error{background:#c0392b}
+.vuln-count{font-size:3.5em;font-weight:800;text-align:center;margin:16px 0}
+.c-critical{color:#c0392b}.c-high{color:#e67e22}.c-medium{color:#f39c12}.c-clean{color:#27ae60}
+.stats{background:#f4f6fb;padding:18px;border-radius:8px;margin:18px 0}
+.stat-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #e0e0e0}
+.stat-row:last-child{border-bottom:none}
+.btn{display:block;width:100%;padding:16px;text-align:center;border-radius:8px;font-size:1.1em;font-weight:700;text-decoration:none;margin:10px 0;transition:opacity .2s}
+.btn:hover{opacity:.88}
+.btn-green{background:#27ae60;color:#fff}
+.btn-blue{background:#0f3460;color:#fff}
+.sev-table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}
+.sev-table th,.sev-table td{padding:8px 12px;border:1px solid #ddd;text-align:left}
+.sev-table th{background:#f4f6fb}
+.badge{padding:2px 9px;border-radius:10px;font-size:12px;font-weight:700;color:#fff}
+.bg-critical{background:#c0392b}.bg-high{background:#e67e22}.bg-medium{background:#f39c12}.bg-low{background:#27ae60}.bg-info{background:#2980b9}
+.nav{text-align:right;margin-bottom:12px}
+.nav a{color:#0f3460;font-size:14px;margin-left:14px;text-decoration:none}
+</style>
+</head><body><div class="container">
+
+<div class="nav"><a href="/">🏠 Home</a><a href="/history">📋 History</a></div>
+
+{% if error %}
+<div class="header-box error"><h2>❌ Scan Failed</h2><p>{{ error }}</p></div>
+{% else %}
+<div class="header-box success">
+  <h2>✅ Scan Complete</h2>
+  <p><strong>Target:</strong> {{ url }}</p>
+  <p><strong>Scan ID:</strong> {{ scan_id }}</p>
+</div>
+
+<div class="vuln-count {{ severity_class }}">{{ count }}</div>
+<p style="text-align:center;font-size:1.1em;margin-bottom:20px">Vulnerabilities Found</p>
+
+<table class="sev-table">
+  <tr><th>Severity</th><th>Count</th></tr>
+  <tr><td><span class="badge bg-critical">Critical</span></td><td>{{ counts.Critical }}</td></tr>
+  <tr><td><span class="badge bg-high">High</span></td><td>{{ counts.High }}</td></tr>
+  <tr><td><span class="badge bg-medium">Medium</span></td><td>{{ counts.Medium }}</td></tr>
+  <tr><td><span class="badge bg-low">Low</span></td><td>{{ counts.Low }}</td></tr>
+  <tr><td><span class="badge bg-info">Info</span></td><td>{{ counts.Info }}</td></tr>
+</table>
+
+<div class="stats">
+  <div class="stat-row"><span>URLs Crawled</span><span>{{ stats.urls_crawled }}</span></div>
+  <div class="stat-row"><span>Forms Tested</span><span>{{ stats.forms_tested }}</span></div>
+  <div class="stat-row"><span>Parameters Tested</span><span>{{ stats.parameters_tested }}</span></div>
+</div>
+
+<a href="/download/{{ scan_id }}" class="btn btn-green">📥 Download PDF Report</a>
+<a href="/results/{{ scan_id }}" class="btn btn-blue">📊 View Detailed Results</a>
+{% endif %}
+<a href="/" style="display:block;text-align:center;color:#0f3460;margin-top:14px">← Scan Another Website</a>
+</div></body></html>
+"""
+
+
+HISTORY_TEMPLATE = """
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Scan History</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#1a1a2e,#0f3460);min-height:100vh;padding:20px}
+.container{max-width:960px;margin:0 auto;background:#fff;border-radius:16px;padding:36px;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+h1{color:#0f3460;margin-bottom:24px}
+.nav{text-align:right;margin-bottom:12px}
+.nav a{color:#0f3460;font-size:14px;margin-left:14px;text-decoration:none}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:10px 14px;border:1px solid #ddd;text-align:left}
+th{background:#f4f6fb}
+tr:hover{background:#f9f9f9}
+.badge{padding:2px 9px;border-radius:10px;font-size:12px;font-weight:700;color:#fff}
+.bg-done{background:#27ae60}.bg-failed{background:#c0392b}.bg-running{background:#f39c12}
+a.link{color:#0f3460;text-decoration:none}
+a.link:hover{text-decoration:underline}
+.empty{color:#888;text-align:center;padding:40px}
+</style>
+</head><body><div class="container">
+<div class="nav"><a href="/">🏠 Home</a></div>
+<h1>📋 Scan History</h1>
+{% if scans %}
+<table>
+  <thead><tr><th>ID</th><th>Target</th><th>Status</th><th>Vulns</th><th>Started</th><th>Actions</th></tr></thead>
+  <tbody>
+  {% for s in scans %}
+  <tr>
+    <td><code>{{ s.id }}</code></td>
+    <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis">{{ s.url }}</td>
+    <td><span class="badge bg-{{ s.status }}">{{ s.status }}</span></td>
+    <td>{{ s.vuln_count }}</td>
+    <td>{{ s.started_at[:16] }}</td>
+    <td>
+      <a class="link" href="/results/{{ s.id }}">View</a>
+      {% if s.report_path %}&nbsp;·&nbsp;<a class="link" href="/download/{{ s.id }}">PDF</a>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No scans yet. <a href="/">Start your first scan →</a></p>
+{% endif %}
+</div></body></html>
+"""
+
+
+DETAIL_TEMPLATE = """
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Scan Detail – {{ scan.id }}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#1a1a2e,#0f3460);min-height:100vh;padding:20px}
+.container{max-width:960px;margin:0 auto;background:#fff;border-radius:16px;padding:36px;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+h1{color:#0f3460;margin-bottom:4px;font-size:1.5em}
+.meta{color:#555;font-size:13px;margin-bottom:24px}
+.nav{text-align:right;margin-bottom:12px}
+.nav a{color:#0f3460;font-size:14px;margin-left:14px;text-decoration:none}
+.vuln-card{border:1px solid #ddd;border-radius:8px;margin:14px 0;overflow:hidden}
+.vuln-header{padding:12px 16px;display:flex;align-items:center;gap:12px;background:#f8f8f8}
+.vuln-body{padding:14px 16px;font-size:14px;color:#333;line-height:1.6}
+.badge{padding:3px 10px;border-radius:10px;font-size:12px;font-weight:700;color:#fff}
+.bg-Critical{background:#c0392b}.bg-High{background:#e67e22}.bg-Medium{background:#f39c12}
+.bg-Low{background:#27ae60}.bg-Info{background:#2980b9}
+.type{font-weight:700;color:#222;font-size:15px}
+.param{font-family:monospace;background:#eef;padding:1px 5px;border-radius:3px;font-size:13px}
+.url{font-family:monospace;font-size:12px;color:#555;word-break:break-all}
+.empty{color:#888;padding:24px;text-align:center}
+.dl-btn{display:inline-block;padding:10px 20px;background:#27ae60;color:#fff;border-radius:7px;text-decoration:none;font-weight:700;margin-bottom:16px}
+</style>
+</head><body><div class="container">
+<div class="nav"><a href="/">🏠 Home</a><a href="/history">📋 History</a></div>
+<h1>Scan Results – <code>{{ scan.id }}</code></h1>
+<div class="meta">Target: {{ scan.url }} · Started: {{ scan.started_at[:16] }} · Status: {{ scan.status }}</div>
+
+{% if scan.report_path %}
+<a class="dl-btn" href="/download/{{ scan.id }}">📥 Download PDF</a>
+{% endif %}
+
+{% if vulns %}
+{% for v in vulns %}
+<div class="vuln-card">
+  <div class="vuln-header">
+    <span class="badge bg-{{ v.severity }}">{{ v.severity }}</span>
+    <span class="type">{{ v.vuln_type }}</span>
+    {% if v.parameter %}<span class="param">param: {{ v.parameter }}</span>{% endif %}
+  </div>
+  <div class="vuln-body">
+    <div class="url">{{ v.url }}</div>
+    <p style="margin-top:8px">{{ v.description }}</p>
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<p class="empty">No vulnerabilities recorded for this scan.</p>
+{% endif %}
+
+</div></body></html>
+"""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Routes
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.route("/")
 def index():
-    """Home page"""
     return render_template_string(HOME_TEMPLATE)
 
-@app.route('/scan', methods=['POST'])
+
+@app.route("/scan", methods=["POST"])
 @limiter.limit("5 per hour")
 def scan():
-    """Run vulnerability scan"""
-    target_url = request.form.get('url', '').strip()
-    selected_modules = request.form.getlist('modules')
-    
-    # Validate URL
+    target_url = request.form.get("url", "").strip()
+    selected_modules = request.form.getlist("modules")
+
     if not target_url:
         return render_template_string(RESULT_TEMPLATE, error="URL is required"), 400
-    
-    if not target_url.startswith(('http://', 'https://')):
-        return render_template_string(RESULT_TEMPLATE, error="URL must start with http:// or https://"), 400
-    
-    # Generate scan ID
+    if not target_url.startswith(("http://", "https://")):
+        return render_template_string(RESULT_TEMPLATE,
+                                      error="URL must start with http:// or https://"), 400
+
     scan_id = str(uuid.uuid4())[:8]
-    
+    scan_db.create_scan(scan_id, target_url)
+
     try:
-        # Configure scan
         scan_config = {
-            'max_depth': 2,
-            'threads': 3,
-            'request_timeout': 15,
-            'delay': 0.2,
+            "max_depth": 2,
+            "threads": 5,
+            "request_timeout": 15,
+            "delay": 0.2,
+            "verify_ssl": True,
         }
-        
-        # Run scan
+
+        # Parse auth fields from form
+        raw_cookie = request.form.get("auth_cookie", "").strip()
+        if raw_cookie:
+            cookies = {}
+            for pair in raw_cookie.split(","):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    cookies[k.strip()] = v.strip()
+            scan_config["auth_cookies"] = cookies
+
+        raw_header = request.form.get("auth_header", "").strip()
+        if raw_header and ":" in raw_header:
+            k, v = raw_header.split(":", 1)
+            scan_config["auth_headers"] = {k.strip(): v.strip()}
+
+        auth_user = request.form.get("auth_user", "").strip()
+        auth_pass = request.form.get("auth_pass", "").strip()
+        if auth_user and auth_pass:
+            scan_config["auth_basic"] = (auth_user, auth_pass)
+
         scanner = VulnerabilityScanner(target_url, scan_config)
         vulnerabilities = scanner.run_scan()
-        
-        # Generate PDF report
+
+        # PDF report
         pdf_gen = PDFReportGenerator()
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_file = OUTPUT_DIR / f"scan_{scan_id}_{timestamp}.pdf"
-        
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = OUTPUT_DIR / f"scan_{scan_id}_{ts}.pdf"
         report_path = pdf_gen.generate_report(
-            target_url,
-            vulnerabilities,
-            scanner.scan_stats,
-            output_file
+            target_url, vulnerabilities, scanner.scan_stats, output_file
         )
-        
-        # Store result
-        scan_results[scan_id] = {
-            'url': target_url,
-            'vulnerabilities': len(vulnerabilities),
-            'report': report_path,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        # Determine severity class
-        if len(vulnerabilities) == 0:
-            severity_class = 'vuln-low'
-        elif any(v.get('severity') == 'Critical' for v in vulnerabilities):
-            severity_class = 'vuln-critical'
-        elif any(v.get('severity') == 'High' for v in vulnerabilities):
-            severity_class = 'vuln-high'
+
+        scan_db.finish_scan(scan_id, vulnerabilities, scanner.scan_stats, report_path)
+
+        counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
+        for v in vulnerabilities:
+            sev = v.get("severity", "Info")
+            counts[sev] = counts.get(sev, 0) + 1
+
+        if counts["Critical"] > 0:
+            sev_class = "c-critical"
+        elif counts["High"] > 0:
+            sev_class = "c-high"
+        elif counts["Medium"] > 0:
+            sev_class = "c-medium"
         else:
-            severity_class = 'vuln-medium'
-        
+            sev_class = "c-clean"
+
         return render_template_string(
             RESULT_TEMPLATE,
             url=target_url,
             scan_id=scan_id,
             count=len(vulnerabilities),
-            severity_class=severity_class,
+            severity_class=sev_class,
+            counts=counts,
             stats=scanner.scan_stats,
-            error=None
+            error=None,
         )
-        
-    except Exception as e:
-        return render_template_string(RESULT_TEMPLATE, error=str(e)), 500
 
-@app.route('/download/<scan_id>')
-def download_report(scan_id):
-    """Download PDF report"""
-    if scan_id not in scan_results:
+    except Exception as exc:
+        scan_db.mark_scan_failed(scan_id, str(exc))
+        return render_template_string(RESULT_TEMPLATE, error=str(exc)), 500
+
+
+@app.route("/history")
+def history():
+    scans = scan_db.list_scans(50)
+    return render_template_string(HISTORY_TEMPLATE, scans=scans)
+
+
+@app.route("/results/<scan_id>")
+def scan_detail(scan_id: str):
+    scan = scan_db.get_scan(scan_id)
+    if not scan:
+        return "Scan not found", 404
+    vulns = scan_db.get_scan_vulns(scan_id)
+    return render_template_string(DETAIL_TEMPLATE, scan=scan, vulns=vulns)
+
+
+@app.route("/download/<scan_id>")
+def download_report(scan_id: str):
+    scan = scan_db.get_scan(scan_id)
+    if not scan or not scan.get("report_path"):
         return "Report not found", 404
-    
-    report_path = scan_results[scan_id]['report']
-    
+    report_path = scan["report_path"]
     if not os.path.exists(report_path):
         return "Report file not found", 404
-    
-    return send_file(
-        report_path,
-        as_attachment=True,
-        download_name=f"vulnerability_report_{scan_id}.pdf"
-    )
+    return send_file(report_path, as_attachment=True,
+                     download_name=f"vuln_report_{scan_id}.pdf")
+
 
 @app.errorhandler(429)
 def ratelimit_handler(e):
-    """Rate limit exceeded"""
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head><title>Rate Limited</title></head>
-    <body style="text-align: center; padding: 50px; font-family: Arial;">
-        <h1>⏳ Rate Limit Exceeded</h1>
-        <p>Please wait before scanning again.</p>
-        <a href="/">← Go Back</a>
-    </body>
-    </html>
-    '''), 429
+    return "<h1>⏳ Rate limit exceeded</h1><p>Max 5 scans/hour per IP.</p><a href='/'>Back</a>", 429
 
-if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+
+if __name__ == "__main__":
+    app.run(debug=False, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
