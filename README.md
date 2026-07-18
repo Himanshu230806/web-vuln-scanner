@@ -69,11 +69,11 @@ A Python-based web application scanner that crawls a target site and tests it ag
 
 | Scan Form | |
 |---|---|
-| ![alt text](ss/scan.png) |  |
+| ![alt text](ss/scan.jpg) |  |
 
-| Results Page | PDF Report |
+| Results Page | History Page |
 |---|---|
-| ![alt text](ss/result.png) | ![PDF report screenshot]![alt text](ss/report.png) |
+| ![alt text](ss/result.jpg) | ![alt text](ss/history.jpg) |
 
 
 ---
