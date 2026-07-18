@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: web-vuln-scanner
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && python -m playwright install --with-deps chromium
+    # gevent worker + timeout for SSE streaming (progress bar)
+    startCommand: gunicorn web_app:app --worker-class gevent --workers 2 --timeout 300 --keep-alive 5
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: FLASK_ENV
+        value: production
+      - key: OUTPUT_DIR
+        value: /opt/render/project/src/output
+      - key: LOGS_DIR
+        value: /opt/render/project/src/logs
+      - key: DB_PATH
+        value: /opt/render/project/src/output/scan_history.db
+      - key: SCANNER_COMPANY
+        value: Security Assessment Team
+    disk:
+      name: scanner-data
+      mountPath: /opt/render/project/src/output
+      sizeGB: 1
